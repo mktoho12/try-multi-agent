@@ -1,0 +1,15 @@
+[project]
+name = "try-multi-agent"
+version = "0.1.0"
+description = "Multi-agent development framework with priority pipeline orchestration"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "orchestrator*", "tools*", "workspace*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
