@@ -20,12 +20,13 @@ class PipelineOrchestrator:
         tool_registry: ToolRegistry,
         workspace: SharedWorkspace,
         max_workers: int = 4,
+        skip_phases: set[str] | None = None,
     ) -> None:
         self._phases = sorted(phases, key=lambda p: p.priority)
         self._registry = tool_registry
         self._workspace = workspace
         self._max_workers = max_workers
-        self._completed_phases: set[str] = set()
+        self._completed_phases: set[str] = set(skip_phases or ())
 
     def _create_agent(self, role: str) -> Agent:
         cls = AGENT_CLASSES[role]
@@ -46,6 +47,11 @@ class PipelineOrchestrator:
         results: dict[str, dict[str, str]] = {}
 
         for phase in self._phases:
+            if phase.name in self._completed_phases:
+                logger.info("Skipping phase '%s' (already completed)", phase.name)
+                results[phase.name] = {"_skipped": "true"}
+                continue
+
             logger.info(
                 "=" * 60 + "\n Phase: %s [%s] — agents: %s\n" + "=" * 60,
                 phase.name,

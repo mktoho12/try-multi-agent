@@ -114,10 +114,17 @@ def main() -> None:
     workspace = SharedWorkspace(config.WORKSPACE_DIR)
     tool_registry = create_tool_registry(workspace)
 
+    skip = set()
+    if "--skip" in sys.argv:
+        idx = sys.argv.index("--skip")
+        skip = set(sys.argv[idx + 1].split(","))
+        logger.info("Skipping phases: %s", skip)
+
     orchestrator = PipelineOrchestrator(
         phases=PHASES,
         tool_registry=tool_registry,
         workspace=workspace,
+        skip_phases=skip,
     )
 
     logger.info("Starting multi-agent pipeline (%d phases)", len(PHASES))

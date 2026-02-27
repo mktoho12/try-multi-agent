@@ -3,5 +3,6 @@ services:
     build: .
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    command: ["uv", "run", "python", "main.py", "--skip", "requirements,design,implementation,review_and_test,infrastructure,legal_compliance"]
     volumes:
       - ./workspace_output:/app/workspace_output

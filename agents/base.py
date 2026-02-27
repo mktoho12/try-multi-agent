@@ -39,6 +39,13 @@ class Agent:
         ctx = self._workspace.get_context_summary()
         return f"{self.system_prompt}\n\n{ctx}"
 
+    def _trim_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop earlier tool-call rounds to fit context window, keeping first and last messages."""
+        if len(messages) <= 3:
+            return messages
+        # Keep the first user message and the last 2 messages (most recent exchange)
+        return [messages[0]] + messages[-2:]
+
     def run(self, task_description: str) -> str:
         logger.info("[%s] Starting — %s", self.role, task_description[:80])
         tools = self._registry.get_schemas(self.tool_names or None)
@@ -59,7 +66,16 @@ class Agent:
             if tools:
                 kwargs["tools"] = tools
 
-            response = self._client.messages.create(**kwargs)
+            try:
+                response = self._client.messages.create(**kwargs)
+            except anthropic.BadRequestError as exc:
+                if "prompt is too long" in str(exc):
+                    logger.warning("[%s] Context too long, trimming messages", self.role)
+                    messages = self._trim_messages(messages)
+                    kwargs["messages"] = messages
+                    response = self._client.messages.create(**kwargs)
+                else:
+                    raise
 
             # Collect any text produced in this turn
             for block in response.content:
