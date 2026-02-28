@@ -33,6 +33,7 @@ class OrchestratorAgent(Agent):
 - code_reviewer: コード品質レビュー
 - test_engineer: テスト観点レビュー
 - security_reviewer: セキュリティレビュー
+- validation_engineer: ランタイム検証（実際にコードを実行してエラーを検出）
 
 # 出力形式
 必ず以下の JSON 形式で出力してください（他のテキストは不要です）:

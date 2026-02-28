@@ -17,6 +17,7 @@ from agents.document_writer import DocumentWriterAgent
 from agents.orchestrator_agent import OrchestratorAgent
 from agents.operator_agent import OperatorAgent
 from agents.it_systems_agent import ITSystemsAgent
+from agents.validation_engineer import ValidationEngineerAgent
 
 if TYPE_CHECKING:
     from agents.base import Agent
@@ -37,4 +38,5 @@ AGENT_CLASSES: dict[str, type[Agent]] = {
     "orchestrator": OrchestratorAgent,
     "operator": OperatorAgent,
     "it_systems": ITSystemsAgent,
+    "validation_engineer": ValidationEngineerAgent,
 }

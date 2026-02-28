@@ -1,3 +1,4 @@
+import config
 from tools.registry import ToolRegistry
 from tools.file_io import READ_FILE, WRITE_FILE, LIST_FILES, set_workspace
 from tools.shell import RUN_SHELL
@@ -26,4 +27,10 @@ def create_tool_registry(workspace: SharedWorkspace) -> ToolRegistry:
         UPDATE_FEEDBACK_STATUS,
     ]:
         registry.register(tool_def)
+
+    if config.ENABLE_BROWSER_VALIDATION:
+        from tools.browser import BROWSER_NAVIGATE, BROWSER_SCREENSHOT, BROWSER_CONSOLE_ERRORS
+        for tool_def in [BROWSER_NAVIGATE, BROWSER_SCREENSHOT, BROWSER_CONSOLE_ERRORS]:
+            registry.register(tool_def)
+
     return registry

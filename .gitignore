@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 workspace_output/
 .env
+.mcp.json
+RESUME.md

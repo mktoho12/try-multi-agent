@@ -29,6 +29,7 @@ _ROLE_COLORS: dict[str, str] = {
     "legal_agent":        "\033[90m",   # gray
     "tax_agent":          "\033[90m",   # gray
     "document_writer":    "\033[97m",   # bright white
+    "validation_engineer":"\033[31;1m", # bold red
 }
 _RESET = "\033[0m"
 _BOLD  = "\033[1m"
@@ -74,6 +75,12 @@ def _format_tool_detail(name: str, inp: dict[str, Any]) -> str:
         return inp.get("title", "?")[:50]
     if name == "read_messages":
         return ""
+    if name == "browser_navigate":
+        return inp.get("url", "?")
+    if name == "browser_screenshot":
+        return inp.get("filename", "screenshot.png")
+    if name == "browser_console_errors":
+        return ""
     # generic fallback
     s = str(inp)
     return s if len(s) <= 60 else s[:57] + "..."
@@ -89,7 +96,39 @@ _TOOL_ICONS: dict[str, str] = {
     "read_messages":   "<=",
     "submit_feedback": "!! ",
     "create_task":     "++ ",
+    "browser_navigate":      ":: ",
+    "browser_screenshot":    "[] ",
+    "browser_console_errors":"!! ",
 }
+
+
+# ── Agent iteration stats ─────────────────────────────────────────
+_agent_stats: list[dict[str, Any]] = []
+
+
+def clear_agent_stats() -> None:
+    _agent_stats.clear()
+
+
+def get_agent_stats() -> list[dict[str, Any]]:
+    return list(_agent_stats)
+
+
+def print_agent_stats_summary() -> None:
+    """Print a table summarising iteration usage per agent."""
+    if not _agent_stats:
+        return
+    print(f"\n{'':>2}{'Agent':<24} {'Used':>5} / {'Max':>5}  Status", file=sys.stderr, flush=True)
+    print(f"{'':>2}{'-' * 52}", file=sys.stderr, flush=True)
+    for s in _agent_stats:
+        role = s["role"]
+        used = s["iterations_used"]
+        mx = s["max_iterations"]
+        hit = s["hit_max"]
+        tag = _role_tag(role)
+        status = f"{_BOLD}\033[31mHIT LIMIT{_RESET}" if hit else "ok"
+        print(f"  {tag:<44} {used:>5} / {mx:>5}  {status}", file=sys.stderr, flush=True)
+    print(file=sys.stderr, flush=True)
 
 
 class Agent:
@@ -154,6 +193,8 @@ class Agent:
         ]
 
         final_text = ""
+        hit_max = False
+        iterations_used = 0
         for i in range(self.max_iterations):
 
             kwargs: dict[str, Any] = {
@@ -205,10 +246,12 @@ class Agent:
                         _emit(self.role, "..", f"{_DIM}{c}{first_line}{_RESET}")
 
             if response.stop_reason == "end_turn":
+                iterations_used = i + 1
                 _emit(self.role, "OK", f"done  (iter {i + 1}){cache_info}")
                 break
 
             if response.stop_reason != "tool_use":
+                iterations_used = i + 1
                 _emit(self.role, "OK", f"done  (iter {i + 1}, {response.stop_reason}){cache_info}")
                 break
 
@@ -234,6 +277,15 @@ class Agent:
 
             messages.append({"role": "user", "content": tool_results})
         else:
+            iterations_used = self.max_iterations
+            hit_max = True
             _emit(self.role, "!!", f"hit max iterations ({self.max_iterations})")
+
+        _agent_stats.append({
+            "role": self.role,
+            "iterations_used": iterations_used,
+            "max_iterations": self.max_iterations,
+            "hit_max": hit_max,
+        })
 
         return final_text
