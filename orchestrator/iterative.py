@@ -7,13 +7,16 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
-from agents.base import Agent
+import config
+from agents.base import Agent, clear_agent_stats, print_agent_stats_summary
 from agents.registry import AGENT_CLASSES
 from orchestrator.iteration import FeedbackItem, IterationRecord, IterationScope
 from tools.feedback import clear_store as clear_feedback_store
 from tools.feedback import list_feedback
 from tools.registry import ToolRegistry
+from tools.server_manager import ServerManager
 from workspace.shared import SharedWorkspace
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,11 @@ ALL_BUILDERS = [
     "db_architect",
     "backend_engineer",
     "frontend_engineer",
+]
+BUILDER_PHASES = [
+    ["product_manager"],                        # Phase 1: 要件定義
+    ["system_architect", "db_architect"],        # Phase 2: 設計（並列）
+    ["backend_engineer", "frontend_engineer"],   # Phase 3: 実装（並列）
 ]
 ALL_REVIEWERS = [
     "operator",
@@ -136,18 +144,18 @@ class IterativeOrchestrator:
         scope: IterationScope,
         iteration: int,
     ) -> dict[str, str]:
-        """Run selected builder agents in parallel."""
+        """Run selected builder agents in dependency order (BUILDER_PHASES)."""
         results: dict[str, str] = {}
-        roles = scope.builder_agents
+        requested = set(scope.builder_agents)
 
-        if not roles:
+        if not requested:
             logger.info("[iteration %d] No builders to run", iteration)
             return results
 
         logger.info(
             "[iteration %d] Running builders: %s",
             iteration,
-            ", ".join(roles),
+            ", ".join(scope.builder_agents),
         )
 
         def build_task(role: str) -> str:
@@ -160,24 +168,31 @@ class IterativeOrchestrator:
                 parts.append(f"\n\n# 前回のフィードバック（参考）\n{fb}")
             return "\n".join(parts)
 
-        if len(roles) == 1:
-            role = roles[0]
-            _, result = self._run_agent(role, build_task(role))
-            results[role] = result
-        else:
-            with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-                futures = {
-                    pool.submit(self._run_agent, role, build_task(role)): role
-                    for role in roles
-                }
-                for future in as_completed(futures):
-                    role = futures[future]
-                    try:
-                        _, result = future.result()
-                        results[role] = result
-                    except Exception:
-                        logger.exception("[iteration %d] Builder %s failed", iteration, role)
-                        results[role] = f"ERROR: builder {role} failed"
+        for phase in BUILDER_PHASES:
+            phase_roles = [r for r in phase if r in requested]
+            if not phase_roles:
+                continue
+
+            logger.info("[iteration %d] Builder phase: %s", iteration, ", ".join(phase_roles))
+
+            if len(phase_roles) == 1:
+                role = phase_roles[0]
+                _, result = self._run_agent(role, build_task(role))
+                results[role] = result
+            else:
+                with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+                    futures = {
+                        pool.submit(self._run_agent, role, build_task(role)): role
+                        for role in phase_roles
+                    }
+                    for future in as_completed(futures):
+                        role = futures[future]
+                        try:
+                            _, result = future.result()
+                            results[role] = result
+                        except Exception:
+                            logger.exception("[iteration %d] Builder %s failed", iteration, role)
+                            results[role] = f"ERROR: builder {role} failed"
 
         return results
 
@@ -253,6 +268,61 @@ class IterativeOrchestrator:
             )
         return items
 
+    def _run_validation(
+        self,
+        task_description: str,
+        iteration: int,
+    ) -> dict[str, str]:
+        """Run runtime validation: start servers, execute validation agent, clean up."""
+        if not config.ENABLE_RUNTIME_VALIDATION:
+            return {}
+
+        workspace_root = self._workspace.root
+        server_mgr = ServerManager(workspace_root)
+
+        backend_status = server_mgr.start_backend()
+        frontend_status = server_mgr.start_frontend()
+
+        server_context = (
+            f"\n\n# サーバー状態\n"
+            f"- Backend: {json.dumps(backend_status)}\n"
+            f"- Frontend: {json.dumps(frontend_status)}\n"
+        )
+        browser_context = ""
+        if config.ENABLE_BROWSER_VALIDATION:
+            browser_context = (
+                f"\n# ブラウザ検証\n"
+                f"ブラウザツール (browser_navigate, browser_screenshot, browser_console_errors) が利用可能です。\n"
+                f"バックエンドポート: {config.BACKEND_PORT}, フロントエンドポート: {config.FRONTEND_PORT}\n"
+            )
+        else:
+            browser_context = (
+                "\n# ブラウザ検証\n"
+                "ブラウザツールは無効です。curl ベースの検証のみ行ってください。\n"
+            )
+
+        validation_task = (
+            task_description
+            + f"\n\n# ランタイム検証 (イテレーション {iteration})\n"
+            f"ワークスペースの成果物を実行して検証してください。\n"
+            f"submit_feedback で iteration={iteration}, reviewer_role='validation_engineer' を指定してください。"
+            + server_context
+            + browser_context
+        )
+
+        try:
+            logger.info("[iteration %d] Running validation engineer", iteration)
+            _, result = self._run_agent("validation_engineer", validation_task)
+            return {"validation_engineer": result}
+        finally:
+            server_mgr.stop_all()
+            if config.ENABLE_BROWSER_VALIDATION:
+                try:
+                    from tools.browser import shutdown_chrome
+                    shutdown_chrome()
+                except Exception:
+                    pass
+
     def _run_finalization(self, task_description: str) -> dict[str, str]:
         """Run finalization agents (legal, tax, infra, docs) once."""
         logger.info("Running finalization agents: %s", ", ".join(FINALIZATION_AGENTS))
@@ -294,6 +364,7 @@ class IterativeOrchestrator:
     def run(self, task_description: str) -> dict[str, dict[str, str]]:
         """Run the iterative build/review loop."""
         clear_feedback_store()
+        clear_agent_stats()
         results: dict[str, dict[str, str]] = {}
 
         for iteration in range(1, self._max_iterations + 1):
@@ -333,11 +404,16 @@ class IterativeOrchestrator:
             build_results = self._run_builders(task_description, scope, iteration)
             results[f"iteration_{iteration}_build"] = build_results
 
-            # 3. Review
+            # 3. Review (static)
             review_results = self._run_reviewers(task_description, scope, iteration)
             results[f"iteration_{iteration}_review"] = review_results
 
-            # 4. Collect feedback
+            # 4. Runtime Validation
+            validation_results = self._run_validation(task_description, iteration)
+            if validation_results:
+                results[f"iteration_{iteration}_validation"] = validation_results
+
+            # 5. Collect feedback
             feedback = self._collect_feedback(iteration)
             self._log_feedback_summary(feedback, iteration)
 
@@ -360,6 +436,9 @@ class IterativeOrchestrator:
 
         # Write feedback summary to workspace
         self._write_feedback_summary()
+
+        # Print agent iteration usage summary
+        print_agent_stats_summary()
 
         return results
 
