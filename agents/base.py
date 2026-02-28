@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 import anthropic
@@ -10,6 +11,85 @@ from tools.registry import ToolRegistry
 from workspace.shared import SharedWorkspace
 
 logger = logging.getLogger(__name__)
+
+# ── ANSI color helpers ──────────────────────────────────────────────
+_ROLE_COLORS: dict[str, str] = {
+    "orchestrator":       "\033[95m",   # magenta
+    "product_manager":    "\033[96m",   # cyan
+    "system_architect":   "\033[93m",   # yellow
+    "db_architect":       "\033[94m",   # blue
+    "backend_engineer":   "\033[92m",   # green
+    "frontend_engineer":  "\033[91m",   # red
+    "code_reviewer":      "\033[33m",   # dark yellow
+    "test_engineer":      "\033[36m",   # dark cyan
+    "security_reviewer":  "\033[35m",   # dark magenta
+    "infra_engineer":     "\033[34m",   # dark blue
+    "it_systems":         "\033[32m",   # dark green
+    "operator":           "\033[37m",   # white
+    "legal_agent":        "\033[90m",   # gray
+    "tax_agent":          "\033[90m",   # gray
+    "document_writer":    "\033[97m",   # bright white
+}
+_RESET = "\033[0m"
+_BOLD  = "\033[1m"
+_DIM   = "\033[2m"
+
+
+def _color(role: str) -> str:
+    return _ROLE_COLORS.get(role, "\033[0m")
+
+
+def _role_tag(role: str) -> str:
+    return f"{_BOLD}{_color(role)}{role}{_RESET}"
+
+
+def _emit(role: str, icon: str, msg: str) -> None:
+    """Print a colored activity line directly to stderr (bypasses log formatting)."""
+    tag = _role_tag(role)
+    print(f"  {tag} {icon} {msg}", file=sys.stderr, flush=True)
+
+
+def _format_tool_detail(name: str, inp: dict[str, Any]) -> str:
+    """Summarise tool call arguments into a short readable string."""
+    if name == "write_file":
+        path = inp.get("path", "?")
+        size = len(inp.get("content", ""))
+        return f"{path}  ({size:,} chars)"
+    if name == "read_file":
+        return inp.get("path", "?")
+    if name == "list_files":
+        return inp.get("path", "/") or "/"
+    if name == "run_shell":
+        cmd = inp.get("command", "?")
+        return cmd if len(cmd) <= 60 else cmd[:57] + "..."
+    if name == "send_message":
+        to = inp.get("to", "?")
+        body = inp.get("content", "")[:40]
+        return f"-> {to}: {body}"
+    if name == "submit_feedback":
+        sev = inp.get("severity", "?")
+        summary = inp.get("summary", "?")[:50]
+        return f"[{sev}] {summary}"
+    if name == "create_task":
+        return inp.get("title", "?")[:50]
+    if name == "read_messages":
+        return ""
+    # generic fallback
+    s = str(inp)
+    return s if len(s) <= 60 else s[:57] + "..."
+
+
+# ── Tool-name icons ────────────────────────────────────────────────
+_TOOL_ICONS: dict[str, str] = {
+    "write_file":      ">> ",
+    "read_file":       "<< ",
+    "list_files":      "ls ",
+    "run_shell":       " $ ",
+    "send_message":    "=>",
+    "read_messages":   "<=",
+    "submit_feedback": "!! ",
+    "create_task":     "++ ",
+}
 
 
 class Agent:
@@ -47,7 +127,7 @@ class Agent:
         return [messages[0]] + messages[-2:]
 
     def run(self, task_description: str) -> str:
-        logger.info("[%s] Starting — %s", self.role, task_description[:80])
+        _emit(self.role, "~~", f"starting  ({self._effective_model()})")
         tools = self._registry.get_schemas(self.tool_names or None)
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": task_description},
@@ -55,48 +135,74 @@ class Agent:
 
         final_text = ""
         for i in range(self.max_iterations):
-            logger.debug("[%s] Iteration %d", self.role, i + 1)
 
             kwargs: dict[str, Any] = {
                 "model": self._effective_model(),
                 "max_tokens": self._effective_max_tokens(),
-                "system": self._build_system(),
+                "system": [
+                    {
+                        "type": "text",
+                        "text": self._build_system(),
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 "messages": messages,
             }
             if tools:
-                kwargs["tools"] = tools
+                cached_tools = [dict(t) for t in tools]
+                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+                kwargs["tools"] = cached_tools
 
             try:
                 response = self._client.messages.create(**kwargs)
             except anthropic.BadRequestError as exc:
                 if "prompt is too long" in str(exc):
-                    logger.warning("[%s] Context too long, trimming messages", self.role)
+                    _emit(self.role, "!!", "context too long — trimming")
                     messages = self._trim_messages(messages)
                     kwargs["messages"] = messages
                     response = self._client.messages.create(**kwargs)
                 else:
                     raise
 
+            usage = response.usage
+            cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+            cache_read = getattr(usage, "cache_read_input_tokens", 0)
+            cache_parts: list[str] = []
+            if cache_create:
+                cache_parts.append(f"cache_create={cache_create:,}")
+            if cache_read:
+                cache_parts.append(f"cache_read={cache_read:,}")
+            cache_info = f"  ({', '.join(cache_parts)})" if cache_parts else ""
+
             # Collect any text produced in this turn
             for block in response.content:
                 if block.type == "text":
                     final_text = block.text
+                    # Show first meaningful line of agent's thinking
+                    first_line = block.text.strip().split("\n")[0][:80]
+                    if first_line:
+                        c = _color(self.role)
+                        _emit(self.role, "..", f"{_DIM}{c}{first_line}{_RESET}")
 
             if response.stop_reason == "end_turn":
-                logger.info("[%s] Finished (end_turn)", self.role)
+                _emit(self.role, "OK", f"done  (iter {i + 1}){cache_info}")
                 break
 
             if response.stop_reason != "tool_use":
-                logger.info("[%s] Finished (stop_reason=%s)", self.role, response.stop_reason)
+                _emit(self.role, "OK", f"done  (iter {i + 1}, {response.stop_reason}){cache_info}")
                 break
 
-            # Process tool calls
+            # Process tool calls — show cache stats for intermediate iterations
+            if cache_info:
+                _emit(self.role, "$$", f"iter {i + 1}{cache_info}")
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
             messages.append({"role": "assistant", "content": response.content})
 
             tool_results = []
             for tb in tool_use_blocks:
-                logger.debug("[%s] Calling tool %s", self.role, tb.name)
+                icon = _TOOL_ICONS.get(tb.name, "?  ")
+                detail = _format_tool_detail(tb.name, tb.input)
+                _emit(self.role, icon, detail)
                 result = self._registry.execute(tb.name, tb.input)
                 tool_results.append(
                     {
@@ -108,7 +214,6 @@ class Agent:
 
             messages.append({"role": "user", "content": tool_results})
         else:
-            logger.warning("[%s] Hit max_iterations (%d)", self.role, self.max_iterations)
+            _emit(self.role, "!!", f"hit max iterations ({self.max_iterations})")
 
-        logger.info("[%s] Done", self.role)
         return final_text

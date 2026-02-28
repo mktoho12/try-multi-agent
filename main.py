@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 
@@ -17,6 +18,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
+# Suppress noisy HTTP request logs — agent activity is shown via _emit() in base.py
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("anthropic").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 PHASES = [
@@ -97,37 +102,65 @@ TASK_DESCRIPTION = """\
    - 経費記録（修繕費・管理費・水道光熱費等）
 
 # 技術要件
-- バックエンド: Python + FastAPI
+- バックエンド: Python + FastAPI（JSON API のみ、HTML レンダリングなし）
+- API 設計: OpenAPI-first — Pydantic モデルから OpenAPI 3.1 スキーマ自動生成
 - データベース: SQLite
-- フロントエンド: Jinja2 テンプレート + シンプルな HTML/CSS/JS
+- フロントエンド: Next.js (React/TypeScript) — App Router, Tailwind CSS
+- API 連携: OpenAPI スキーマに基づく型付きクライアント
 - 単一管理人利用（マルチテナント不要）
 - セキュリティ重視（個人情報・金融データの保護）
 - 日本法準拠（借地借家法・個人情報保護法・所得税法）
 """
 
 
-def main() -> None:
-    if not config.ANTHROPIC_API_KEY:
-        logger.error("ANTHROPIC_API_KEY is not set")
-        sys.exit(1)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Multi-agent development framework",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["waterfall", "iterative"],
+        default="waterfall",
+        help="Execution mode (default: waterfall)",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=config.MAX_ITERATIONS,
+        help=f"Max iterations for iterative mode (default: {config.MAX_ITERATIONS})",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Max parallel workers (default: 4)",
+    )
+    parser.add_argument(
+        "--skip",
+        type=str,
+        default="",
+        help="Comma-separated phase names to skip (waterfall mode only)",
+    )
+    return parser.parse_args()
 
+
+def run_waterfall(args: argparse.Namespace) -> None:
     workspace = SharedWorkspace(config.WORKSPACE_DIR)
     tool_registry = create_tool_registry(workspace)
 
-    skip = set()
-    if "--skip" in sys.argv:
-        idx = sys.argv.index("--skip")
-        skip = set(sys.argv[idx + 1].split(","))
+    skip = set(args.skip.split(",")) if args.skip else set()
+    if skip:
         logger.info("Skipping phases: %s", skip)
 
     orchestrator = PipelineOrchestrator(
         phases=PHASES,
         tool_registry=tool_registry,
         workspace=workspace,
+        max_workers=args.max_workers,
         skip_phases=skip,
     )
 
-    logger.info("Starting multi-agent pipeline (%d phases)", len(PHASES))
+    logger.info("Starting waterfall pipeline (%d phases)", len(PHASES))
     results = orchestrator.run(TASK_DESCRIPTION)
 
     logger.info("=" * 60)
@@ -139,6 +172,49 @@ def main() -> None:
             logger.info("    %s: %s...", role, preview)
 
     logger.info("Artifacts written to: %s", config.WORKSPACE_DIR)
+
+
+def run_iterative(args: argparse.Namespace) -> None:
+    from orchestrator.iterative import IterativeOrchestrator
+
+    workspace = SharedWorkspace(config.WORKSPACE_DIR)
+    tool_registry = create_tool_registry(workspace)
+
+    orchestrator = IterativeOrchestrator(
+        tool_registry=tool_registry,
+        workspace=workspace,
+        max_iterations=args.max_iterations,
+        max_workers=args.max_workers,
+    )
+
+    logger.info(
+        "Starting iterative pipeline (max %d iterations)",
+        args.max_iterations,
+    )
+    results = orchestrator.run(TASK_DESCRIPTION)
+
+    logger.info("=" * 60)
+    logger.info("Pipeline complete — results:")
+    for section, agent_results in results.items():
+        logger.info("  %s:", section)
+        for role, text in agent_results.items():
+            preview = text[:100].replace("\n", " ") if text else "(empty)"
+            logger.info("    %s: %s...", role, preview)
+
+    logger.info("Artifacts written to: %s", config.WORKSPACE_DIR)
+
+
+def main() -> None:
+    args = parse_args()
+
+    if not config.ANTHROPIC_API_KEY:
+        logger.error("ANTHROPIC_API_KEY is not set")
+        sys.exit(1)
+
+    if args.mode == "iterative":
+        run_iterative(args)
+    else:
+        run_waterfall(args)
 
 
 if __name__ == "__main__":
