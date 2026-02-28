@@ -52,11 +52,20 @@ class SharedWorkspace:
             return None
         return full.read_text(encoding="utf-8")
 
+    # Directories to exclude from listings and context summaries
+    _EXCLUDE_DIRS = {
+        "node_modules", ".next", "__pycache__", ".venv", "venv",
+        ".git", ".mypy_cache", ".pytest_cache", "dist", "build",
+    }
+
+    def _is_excluded(self, path: Path) -> bool:
+        return any(part in self._EXCLUDE_DIRS for part in path.parts)
+
     def list_files(self, pattern: str = "**/*") -> list[str]:
         return sorted(
             str(p.relative_to(self._root))
             for p in self._root.glob(pattern)
-            if p.is_file()
+            if p.is_file() and not self._is_excluded(p.relative_to(self._root))
         )
 
     def get_context_summary(self) -> str:

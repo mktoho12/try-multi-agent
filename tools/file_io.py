@@ -19,10 +19,15 @@ def _get_ws() -> SharedWorkspace:
     return _workspace
 
 
+MAX_READ_CHARS = 20_000  # ~5,000 tokens 相当
+
+
 def read_file(path: str) -> str:
     content = _get_ws().read_file(path)
     if content is None:
         return json.dumps({"error": f"File not found: {path}"})
+    if len(content) > MAX_READ_CHARS:
+        content = content[:MAX_READ_CHARS] + f"\n\n[truncated — showing first {MAX_READ_CHARS:,} of {len(content):,} chars]"
     return json.dumps({"content": content})
 
 

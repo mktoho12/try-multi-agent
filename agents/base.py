@@ -119,12 +119,32 @@ class Agent:
         ctx = self._workspace.get_context_summary()
         return f"{self.system_prompt}\n\n{ctx}"
 
+    _MAX_RESULT_CHARS = 200
+
     def _trim_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop earlier tool-call rounds to fit context window, keeping first and last messages."""
+        """Shrink tool results in older messages instead of dropping them entirely."""
         if len(messages) <= 3:
             return messages
-        # Keep the first user message and the last 2 messages (most recent exchange)
-        return [messages[0]] + messages[-2:]
+        trimmed = []
+        # Keep first message and last 4 messages intact
+        keep_last = 4
+        for idx, msg in enumerate(messages):
+            if idx == 0 or idx >= len(messages) - keep_last:
+                trimmed.append(msg)
+                continue
+            # For older user messages containing tool_results, truncate the content
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                new_content = []
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        content = block.get("content", "")
+                        if isinstance(content, str) and len(content) > self._MAX_RESULT_CHARS:
+                            block = {**block, "content": content[:self._MAX_RESULT_CHARS] + "… [trimmed]"}
+                    new_content.append(block)
+                trimmed.append({**msg, "content": new_content})
+            else:
+                trimmed.append(msg)
+        return trimmed
 
     def run(self, task_description: str) -> str:
         _emit(self.role, "~~", f"starting  ({self._effective_model()})")
